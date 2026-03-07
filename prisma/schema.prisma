@@ -1,0 +1,396 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Auth (NextAuth) ────────────────────────────────────────────
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Core User ──────────────────────────────────────────────────
+
+enum UserRole {
+  BUYER
+  FREELANCER
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  roles         UserRole[] @default([BUYER])
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Auth relations
+  accounts Account[]
+  sessions Session[]
+
+  // Platform relations
+  organization      Organization?      @relation("OrgOwner")
+  orgMemberships     OrgMembership[]
+  freelancerProfile FreelancerProfile?
+  projectsAsBuyer   Project[]          @relation("BuyerProjects")
+  taskAssignments   Task[]             @relation("TaskAssignee")
+  submissions       Submission[]
+  qaReviews         QAReview[]
+  comments          Comment[]
+  notifications     Notification[]
+  changeRequests    ChangeRequest[]    @relation("CRRequester")
+}
+
+// ─── Organization ───────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner    User            @relation("OrgOwner", fields: [ownerId], references: [id])
+  members  OrgMembership[]
+  projects Project[]
+}
+
+model OrgMembership {
+  id        String   @id @default(cuid())
+  userId    String
+  orgId     String
+  role      String   @default("member") // "owner" | "member"
+  createdAt DateTime @default(now())
+
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, orgId])
+}
+
+// ─── Freelancer Profile ─────────────────────────────────────────
+
+model FreelancerProfile {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  skills         String[] @default([])
+  rateBandMin    Int?     // cents
+  rateBandMax    Int?     // cents
+  portfolioUrls  String[] @default([])
+  bio            String?  @db.Text
+  availability   String   @default("available") // "available" | "busy" | "unavailable"
+  readinessScore Float    @default(0) // 0-100 composite score
+  onTimeRate     Float    @default(100)
+  qaPassRate     Float    @default(100)
+  responseTime   Float    @default(0) // avg hours
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── Project ────────────────────────────────────────────────────
+
+enum ProjectStatus {
+  DRAFT
+  PENDING_PLAN
+  PLAN_REVIEW
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum ProjectType {
+  LANDING_PAGE
+  MARKETING_SITE
+  VIDEO_PRODUCTION
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  title       String
+  type        ProjectType
+  status      ProjectStatus @default(DRAFT)
+  brief       Json          // structured brief data
+  budgetMin   Int           // cents
+  budgetMax   Int           // cents
+  deadline    DateTime?
+  buyerId     String
+  orgId       String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  buyer          User              @relation("BuyerProjects", fields: [buyerId], references: [id])
+  organization   Organization?     @relation(fields: [orgId], references: [id])
+  milestones     Milestone[]
+  workstreams    Workstream[]
+  changeRequests ChangeRequest[]
+  activityLog    ActivityLogEntry[]
+}
+
+// ─── Workstream ─────────────────────────────────────────────────
+
+enum WorkstreamType {
+  DESIGN
+  DEVELOPMENT
+  CONTENT
+  VIDEO
+  QA
+}
+
+model Workstream {
+  id        String         @id @default(cuid())
+  projectId String
+  type      WorkstreamType
+  createdAt DateTime       @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   Task[]
+}
+
+// ─── Milestone ──────────────────────────────────────────────────
+
+enum MilestoneStatus {
+  UPCOMING
+  IN_PROGRESS
+  IN_REVIEW
+  APPROVED
+  COMPLETED
+}
+
+model Milestone {
+  id           String          @id @default(cuid())
+  projectId    String
+  title        String
+  description  String?         @db.Text
+  status       MilestoneStatus @default(UPCOMING)
+  budgetAmount Int             @default(0) // cents
+  dueDate      DateTime?
+  sortOrder    Int             @default(0)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks    Task[]
+  payments Payment[]
+}
+
+// ─── Task ───────────────────────────────────────────────────────
+
+enum TaskStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  SUBMITTED
+  QA_REVIEW
+  FIX_REQUESTED
+  QA_PASSED
+  DELIVERED
+  APPROVED
+}
+
+model Task {
+  id                 String     @id @default(cuid())
+  milestoneId        String
+  workstreamId       String?
+  assigneeId         String?
+  title              String
+  description        String?    @db.Text
+  acceptanceCriteria String[]   @default([])
+  status             TaskStatus @default(NOT_STARTED)
+  dueDate            DateTime?
+  sortOrder          Int        @default(0)
+  revisionCount      Int        @default(0)
+  maxRevisions       Int        @default(2)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  milestone   Milestone    @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+  workstream  Workstream?  @relation(fields: [workstreamId], references: [id])
+  assignee    User?        @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  submissions Submission[]
+  comments    Comment[]
+
+  // Dependencies
+  blockedBy Dependency[] @relation("BlockedTask")
+  blocking  Dependency[] @relation("BlockingTask")
+}
+
+// ─── Dependency ─────────────────────────────────────────────────
+
+model Dependency {
+  id              String @id @default(cuid())
+  blockingTaskId  String
+  blockedTaskId   String
+
+  blockingTask Task @relation("BlockingTask", fields: [blockingTaskId], references: [id], onDelete: Cascade)
+  blockedTask  Task @relation("BlockedTask", fields: [blockedTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([blockingTaskId, blockedTaskId])
+}
+
+// ─── Submission (versioned deliverables) ────────────────────────
+
+model Submission {
+  id          String   @id @default(cuid())
+  taskId      String
+  submitterId String
+  version     Int      @default(1)
+  files       Json     @default("[]") // [{key, name, size, type}]
+  notes       String?  @db.Text
+  submittedAt DateTime @default(now())
+
+  task      Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  submitter User       @relation(fields: [submitterId], references: [id])
+  qaReviews QAReview[]
+}
+
+// ─── QA Review ──────────────────────────────────────────────────
+
+enum QAResult {
+  PASS
+  FAIL
+  PARTIAL
+}
+
+model QAReview {
+  id               String   @id @default(cuid())
+  submissionId     String
+  reviewerId       String
+  result           QAResult
+  checklistResults Json     @default("[]") // [{item, passed, note}]
+  notes            String?  @db.Text
+  createdAt        DateTime @default(now())
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  reviewer   User       @relation(fields: [reviewerId], references: [id])
+}
+
+// ─── Change Request ─────────────────────────────────────────────
+
+enum CRStatus {
+  PENDING
+  APPROVED
+  DECLINED
+  WITHDRAWN
+}
+
+model ChangeRequest {
+  id          String   @id @default(cuid())
+  projectId   String
+  requesterId String
+  title       String
+  description String   @db.Text
+  costDelta   Int      @default(0) // cents (positive = more expensive)
+  timeDelta   Int      @default(0) // days (positive = longer)
+  status      CRStatus @default(PENDING)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  requester User    @relation("CRRequester", fields: [requesterId], references: [id])
+}
+
+// ─── Comment ────────────────────────────────────────────────────
+
+model Comment {
+  id          String   @id @default(cuid())
+  taskId      String
+  userId      String
+  body        String   @db.Text
+  attachments Json     @default("[]") // [{key, name, size, type}]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+}
+
+// ─── Payment ────────────────────────────────────────────────────
+
+enum PaymentStatus {
+  PENDING
+  HELD
+  RELEASED
+  REFUNDED
+  FAILED
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  milestoneId String
+  amount      Int           // cents
+  status      PaymentStatus @default(PENDING)
+  stripeId    String?       @unique
+  metadata    Json?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  milestone Milestone @relation(fields: [milestoneId], references: [id], onDelete: Cascade)
+}
+
+// ─── Notification ───────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // "TASK_ASSIGNED" | "QA_PASSED" | "MILESTONE_READY" | etc.
+  title     String
+  body      String?
+  payload   Json?    // arbitrary data (projectId, taskId, etc.)
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─── Activity Log ───────────────────────────────────────────────
+
+model ActivityLogEntry {
+  id        String   @id @default(cuid())
+  projectId String
+  actorId   String?
+  type      String   // domain event type
+  message   String
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
